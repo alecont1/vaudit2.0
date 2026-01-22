@@ -1,12 +1,17 @@
 """Document upload and management endpoints."""
 
+from pathlib import Path
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from src.api.dependencies import get_session
 from src.domain.schemas.document import DocumentUploadResponse
+from src.domain.schemas.extraction import ExtractionResult
 from src.pipeline.file_storage import save_upload
-from src.storage.models import Document
+from src.storage.models import Document, ValidationResult, ValidationStatus
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -94,3 +99,100 @@ async def upload_document(
         raise HTTPException(
             status_code=500, detail=f"Failed to create document record: {str(e)}"
         ) from e
+
+
+@router.post("/{document_id}/extract", response_model=ExtractionResult, status_code=200)
+async def trigger_extraction(
+    document_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> ExtractionResult:
+    """Trigger LandingAI extraction on an uploaded document.
+
+    Extracts structured data (calibration dates, serial numbers, measurements)
+    from the PDF with visual grounding showing where each field was found.
+    """
+    # 1. Get document from database
+    result = await session.execute(select(Document).where(Document.id == document_id))
+    document = result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if document.status not in ("uploaded", "completed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot extract document with status '{document.status}'",
+        )
+
+    # 2. Run extraction
+    from src.pipeline.extraction import extract_document
+
+    file_path = Path(document.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Document file not found on disk")
+
+    # Update status to processing
+    document.status = "processing"
+    await session.commit()
+
+    try:
+        extraction_result = await extract_document(file_path)
+
+        # 3. Store extraction result in ValidationResult
+        validation = ValidationResult(
+            document_id=document_id,
+            status=ValidationStatus.PENDING,  # Extraction done, validation pending
+            extraction_result_json=extraction_result.model_dump_json(),
+            processing_time_ms=extraction_result.processing_time_ms,
+            model_version=extraction_result.model_version,
+        )
+        session.add(validation)
+
+        # Update document status
+        document.status = "completed" if extraction_result.status == "completed" else "failed"
+        await session.commit()
+
+        # Update document_id in result for response
+        extraction_result.document_id = str(document_id)
+        return extraction_result
+
+    except ValueError as e:
+        # API key not configured
+        document.status = "failed"
+        await session.commit()
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        document.status = "failed"
+        await session.commit()
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
+
+
+@router.get("/{document_id}/extraction", response_model=ExtractionResult, status_code=200)
+async def get_extraction(
+    document_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> ExtractionResult:
+    """Retrieve extraction results for a document.
+
+    Returns the structured extraction data with page/location references
+    for each extracted field.
+    """
+    # Get latest validation result for document
+    result = await session.execute(
+        select(ValidationResult)
+        .where(ValidationResult.document_id == document_id)
+        .order_by(ValidationResult.created_at.desc())
+    )
+    validation = result.scalar_one_or_none()
+
+    if not validation:
+        raise HTTPException(status_code=404, detail="No extraction found for document")
+
+    if not validation.extraction_result_json:
+        raise HTTPException(status_code=404, detail="Extraction not completed")
+
+    import json
+
+    extraction_data = json.loads(validation.extraction_result_json)
+    extraction_data["document_id"] = str(document_id)
+    return ExtractionResult(**extraction_data)
