@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from src.api.routes import health
+from src.api.routes import documents, health
 from src.storage.database import init_db
 
 
@@ -25,3 +25,4 @@ app = FastAPI(
 )
 
 app.include_router(health.router, tags=["health"])
+app.include_router(documents.router, tags=["documents"])

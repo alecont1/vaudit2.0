@@ -23,3 +23,16 @@ class DocumentRead(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class DocumentUploadResponse(BaseModel):
+    """Response after successful document upload."""
+
+    id: UUID
+    filename: str
+    file_hash: str
+    file_size_bytes: int
+    status: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

@@ -51,7 +51,7 @@ class Document(SQLModel, table=True):
     __tablename__ = "documents"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    user_id: UUID = Field(foreign_key="users.id", index=True)
+    user_id: UUID | None = Field(default=None, foreign_key="users.id", index=True)
     filename: str = Field(max_length=255)
     file_path: str = Field(max_length=500)
     file_hash: str = Field(max_length=64, index=True)  # SHA256
@@ -61,7 +61,7 @@ class Document(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     # Relationships
-    user: User = Relationship(back_populates="documents")
+    user: User | None = Relationship(back_populates="documents")
     validation_results: list["ValidationResult"] = Relationship(back_populates="document")
 
 
