@@ -67,30 +67,45 @@ def get_client() -> LandingAIADE:
     return LandingAIADE(apikey=api_key)
 
 
-def _parse_grounding(grounding: dict[str, Any]) -> FieldLocation | None:
-    """Convert LandingAI grounding info to FieldLocation."""
+def _parse_grounding(grounding: Any, chunk_id: str | None = None) -> FieldLocation | None:
+    """Convert LandingAI grounding info to FieldLocation.
+
+    Args:
+        grounding: ChunkGrounding object from LandingAI SDK
+        chunk_id: The chunk ID to store for reference
+    """
     if not grounding:
         return None
 
-    box = grounding.get("box", {})
+    # LandingAI returns Pydantic objects, access attributes directly
+    box = grounding.box if hasattr(grounding, 'box') else None
+    if not box:
+        return None
+
     return FieldLocation(
-        page=grounding.get("page", 0),
+        page=grounding.page if hasattr(grounding, 'page') else 0,
         bbox=BoundingBox(
-            left=box.get("left", 0),
-            top=box.get("top", 0),
-            right=box.get("right", 0),
-            bottom=box.get("bottom", 0),
+            left=box.left if hasattr(box, 'left') else 0,
+            top=box.top if hasattr(box, 'top') else 0,
+            right=box.right if hasattr(box, 'right') else 0,
+            bottom=box.bottom if hasattr(box, 'bottom') else 0,
         ),
-        chunk_id=grounding.get("id"),
+        chunk_id=chunk_id,
     )
 
 
 def _find_field_location(
     field_name: str,
     extraction_metadata: dict[str, Any],
-    chunks: list[dict[str, Any]],
+    chunks: list[Any],
 ) -> FieldLocation | None:
-    """Find location of extracted field using metadata references."""
+    """Find location of extracted field using metadata references.
+
+    Args:
+        field_name: Name of the field to find location for
+        extraction_metadata: Metadata dict from LandingAI extract response
+        chunks: List of Chunk objects from LandingAI parse response
+    """
     field_meta = extraction_metadata.get(field_name, {})
     references = field_meta.get("references", [])
 
@@ -100,8 +115,11 @@ def _find_field_location(
     # Find the chunk matching the first reference
     ref_id = references[0]
     for chunk in chunks:
-        if chunk.get("id") == ref_id:
-            return _parse_grounding(chunk.get("grounding", {}))
+        # LandingAI returns Pydantic Chunk objects, access id attribute directly
+        chunk_id = chunk.id if hasattr(chunk, 'id') else None
+        if chunk_id == ref_id:
+            grounding = chunk.grounding if hasattr(chunk, 'grounding') else None
+            return _parse_grounding(grounding, chunk_id)
 
     return None
 
