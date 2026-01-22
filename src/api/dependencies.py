@@ -1,8 +1,8 @@
 """Shared FastAPI dependencies.
 
-Dependencies for database sessions, authentication, etc.
-will be added as the project grows.
+Central location for dependency injection functions.
 """
 
-# Database session dependency will be added in Plan 02
-# Auth dependencies will be added in Phase 6
+from src.storage.database import get_session
+
+__all__ = ["get_session"]
