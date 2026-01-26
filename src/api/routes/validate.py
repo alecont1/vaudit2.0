@@ -62,10 +62,12 @@ async def validate_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     # 2. Get latest ValidationResult for document (contains extraction)
+    # Use limit(1) since there may be multiple records (append-only audit trail)
     result = await session.execute(
         select(ValidationResult)
         .where(ValidationResult.document_id == document_id)
         .order_by(ValidationResult.created_at.desc())
+        .limit(1)
     )
     validation_result = result.scalar_one_or_none()
 
