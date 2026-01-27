@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.schemas.extraction import (
@@ -26,7 +26,8 @@ from src.domain.schemas.extraction import (
     ExtractedField,
     FieldLocation,
 )
-from src.storage.models import Document, ValidationResult, ValidationStatus
+from src.domain.services.auth import hash_password, create_access_token, hash_token
+from src.storage.models import Document, User, Session, ValidationResult, ValidationStatus
 
 # Import MINIMAL_PDF from test_documents
 from tests.test_documents import MINIMAL_PDF
@@ -46,6 +47,52 @@ async def cleanup_uploads():
         for file in upload_dir.glob("*"):
             if file.is_file():
                 file.unlink()
+
+
+@pytest.fixture
+async def test_user(db_session: AsyncSession):
+    """Create a test user for validation operations."""
+    # Clean up any existing test user first
+    await db_session.execute(delete(Session).where(Session.user_id.in_(
+        select(User.id).where(User.email == "validateep@example.com")
+    )))
+    await db_session.execute(delete(User).where(User.email == "validateep@example.com"))
+    await db_session.commit()
+
+    user = User(
+        id=uuid4(),
+        email="validateep@example.com",
+        hashed_password=hash_password("testpass123"),
+        is_active=True,
+        is_superuser=False,
+        failed_login_attempts=0,
+        must_change_password=False,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    return user
+
+
+@pytest.fixture
+async def auth_headers(db_session: AsyncSession, test_user: User):
+    """Get auth headers with valid token."""
+    token, expires_at = create_access_token(
+        user_id=test_user.id,
+        email=test_user.email,
+        is_admin=test_user.is_superuser,
+        remember_me=False,
+    )
+    # Create session record
+    session = Session(
+        user_id=test_user.id,
+        token_hash=hash_token(token),
+        expires_at=expires_at,
+        is_revoked=False,
+    )
+    db_session.add(session)
+    await db_session.commit()
+    return {"Authorization": f"Bearer {token}"}
 
 
 def create_mock_extraction_result(
@@ -138,23 +185,24 @@ def create_mock_extraction_result(
     )
 
 
-async def upload_test_document(client: AsyncClient) -> str:
+async def upload_test_document(client: AsyncClient, auth_headers: dict) -> str:
     """Helper to upload a test document and return its ID."""
     files = {"file": ("test.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf")}
-    response = await client.post("/documents/upload", files=files)
+    response = await client.post("/documents/upload", files=files, headers=auth_headers)
     assert response.status_code == 201
     return response.json()["id"]
 
 
 async def upload_and_extract_document(
     client: AsyncClient,
+    auth_headers: dict,
     extraction_result: ExtractionResult | None = None,
 ) -> tuple[str, ExtractionResult]:
     """Helper to upload and extract a document.
 
     Returns the document ID and the extraction result used.
     """
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     if extraction_result is None:
         extraction_result = create_mock_extraction_result(document_id)
@@ -164,7 +212,7 @@ async def upload_and_extract_document(
         new_callable=AsyncMock,
         return_value=extraction_result,
     ):
-        response = await client.post(f"/documents/{document_id}/extract")
+        response = await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
         assert response.status_code == 200
 
     return document_id, extraction_result
@@ -176,10 +224,10 @@ async def upload_and_extract_document(
 
 
 @pytest.mark.asyncio
-async def test_validate_document_approved(client: AsyncClient, cleanup_uploads):
+async def test_validate_document_approved(client: AsyncClient, cleanup_uploads, auth_headers):
     """Test validation with valid calibration returns APPROVED status."""
     # Setup: Upload and extract with valid (future) expiration
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_mock_extraction_result(
         document_id,
         expiration_date="2030-12-31",  # Future date = valid
@@ -191,10 +239,10 @@ async def test_validate_document_approved(client: AsyncClient, cleanup_uploads):
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
     # Act: Validate the document
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     # Assert
     assert response.status_code == 200
@@ -209,10 +257,10 @@ async def test_validate_document_approved(client: AsyncClient, cleanup_uploads):
 
 @pytest.mark.asyncio
 async def test_validate_document_rejected_expired(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation with expired calibration returns REJECTED status."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_mock_extraction_result(
         document_id,
         expiration_date="2020-01-15",  # Past date = expired
@@ -223,10 +271,10 @@ async def test_validate_document_rejected_expired(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
     # Validate
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -241,10 +289,10 @@ async def test_validate_document_rejected_expired(
 
 @pytest.mark.asyncio
 async def test_validate_document_rejected_serial_mismatch(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation with mismatched serials returns REJECTED status."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_mock_extraction_result(
         document_id,
         expiration_date="2030-12-31",  # Valid (future)
@@ -258,10 +306,10 @@ async def test_validate_document_rejected_serial_mismatch(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
     # Validate
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -277,10 +325,10 @@ async def test_validate_document_rejected_serial_mismatch(
 
 @pytest.mark.asyncio
 async def test_validate_document_review_needed(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation with missing expiration returns REVIEW_NEEDED status."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Create extraction with missing expiration date
     extraction = ExtractionResult(
@@ -315,10 +363,10 @@ async def test_validate_document_review_needed(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
     # Validate
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -337,11 +385,11 @@ async def test_validate_document_review_needed(
 
 
 @pytest.mark.asyncio
-async def test_validate_document_not_found(client: AsyncClient, cleanup_uploads):
+async def test_validate_document_not_found(client: AsyncClient, cleanup_uploads, auth_headers):
     """Test validation fails with 404 for non-existent document."""
     fake_uuid = "00000000-0000-0000-0000-000000000000"
 
-    response = await client.post(f"/documents/{fake_uuid}/validate")
+    response = await client.post(f"/documents/{fake_uuid}/validate", headers=auth_headers)
 
     assert response.status_code == 404
     assert "not found" in response.json()["detail"].lower()
@@ -349,13 +397,13 @@ async def test_validate_document_not_found(client: AsyncClient, cleanup_uploads)
 
 @pytest.mark.asyncio
 async def test_validate_document_no_extraction(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation fails with 404 when no extraction exists."""
     # Upload document but don't extract
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 404
     assert "no extraction" in response.json()["detail"].lower()
@@ -363,10 +411,10 @@ async def test_validate_document_no_extraction(
 
 @pytest.mark.asyncio
 async def test_validate_extraction_failed(
-    client: AsyncClient, db_session: AsyncSession, cleanup_uploads
+    client: AsyncClient, db_session: AsyncSession, cleanup_uploads, auth_headers
 ):
     """Test validation fails with 400 when extraction was failed status."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Simulate failed extraction
     failed_extraction = ExtractionResult(
@@ -382,10 +430,10 @@ async def test_validate_extraction_failed(
         new_callable=AsyncMock,
         return_value=failed_extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
     # Try to validate
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 400
     assert "failed" in response.json()["detail"].lower()
@@ -398,10 +446,10 @@ async def test_validate_extraction_failed(
 
 @pytest.mark.asyncio
 async def test_validate_stores_result(
-    client: AsyncClient, db_session: AsyncSession, cleanup_uploads
+    client: AsyncClient, db_session: AsyncSession, cleanup_uploads, auth_headers
 ):
     """Test validation stores result in database."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_mock_extraction_result(document_id)
 
     with patch(
@@ -409,10 +457,10 @@ async def test_validate_stores_result(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
     # Validate
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
     assert response.status_code == 200
 
     # Check database - use limit(1) since there may be multiple records
@@ -439,10 +487,10 @@ async def test_validate_stores_result(
 
 @pytest.mark.asyncio
 async def test_validate_response_has_evidence(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation response includes evidence (page, field_name)."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_mock_extraction_result(document_id)
 
     with patch(
@@ -450,10 +498,10 @@ async def test_validate_response_has_evidence(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
     # Validate
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -473,10 +521,10 @@ async def test_validate_response_has_evidence(
 
 @pytest.mark.asyncio
 async def test_validate_with_custom_test_date(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation uses custom test_date query parameter."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Expiration date: 2024-06-15
     extraction = create_mock_extraction_result(
@@ -489,12 +537,13 @@ async def test_validate_with_custom_test_date(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
     # Test date BEFORE expiration -> APPROVED
     response_before = await client.post(
         f"/documents/{document_id}/validate",
         params={"test_date": "2024-01-01"},
+        headers=auth_headers,
     )
     assert response_before.status_code == 200
     assert response_before.json()["status"] == "APPROVED"
@@ -503,6 +552,7 @@ async def test_validate_with_custom_test_date(
     response_after = await client.post(
         f"/documents/{document_id}/validate",
         params={"test_date": "2024-12-01"},
+        headers=auth_headers,
     )
     assert response_after.status_code == 200
     assert response_after.json()["status"] == "REJECTED"
@@ -515,10 +565,10 @@ async def test_validate_with_custom_test_date(
 
 @pytest.mark.asyncio
 async def test_validate_multiple_calibrations_all_valid(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation with multiple valid calibrations returns APPROVED."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_mock_extraction_result(
         document_id,
         expiration_date="2030-12-31",  # Future date = valid
@@ -532,9 +582,9 @@ async def test_validate_multiple_calibrations_all_valid(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -547,12 +597,12 @@ async def test_validate_multiple_calibrations_all_valid(
 
 @pytest.mark.asyncio
 async def test_validate_response_includes_validator_version(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation response includes validator version for audit."""
-    document_id, _ = await upload_and_extract_document(client)
+    document_id, _ = await upload_and_extract_document(client, auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -563,10 +613,10 @@ async def test_validate_response_includes_validator_version(
 
 @pytest.mark.asyncio
 async def test_validate_creates_new_validation_record(
-    client: AsyncClient, db_session: AsyncSession, cleanup_uploads
+    client: AsyncClient, db_session: AsyncSession, cleanup_uploads, auth_headers
 ):
     """Test each validation creates a new ValidationResult record (append-only)."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_mock_extraction_result(document_id)
 
     with patch(
@@ -574,11 +624,11 @@ async def test_validate_creates_new_validation_record(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
     # Validate twice
-    await client.post(f"/documents/{document_id}/validate")
-    await client.post(f"/documents/{document_id}/validate")
+    await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
+    await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     # Check database has multiple records
     result = await db_session.execute(
@@ -594,10 +644,10 @@ async def test_validate_creates_new_validation_record(
 
 @pytest.mark.asyncio
 async def test_validate_unparseable_date_review_needed(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation with unparseable expiration date returns REVIEW_NEEDED."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_mock_extraction_result(
         document_id,
         expiration_date="not-a-date",  # Unparseable
@@ -608,9 +658,9 @@ async def test_validate_unparseable_date_review_needed(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()

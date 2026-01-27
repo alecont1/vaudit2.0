@@ -16,9 +16,12 @@ import json
 from datetime import date
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.schemas.extraction import (
     BoundingBox,
@@ -31,6 +34,8 @@ from src.domain.schemas.extraction import (
     ThermographyData,
     MeasurementReading,
 )
+from src.domain.services.auth import hash_password, create_access_token, hash_token
+from src.storage.models import User, Session
 
 # Import MINIMAL_PDF from test_documents
 from tests.test_documents import MINIMAL_PDF
@@ -52,10 +57,56 @@ async def cleanup_uploads():
                 file.unlink()
 
 
-async def upload_test_document(client: AsyncClient) -> str:
+@pytest.fixture
+async def test_user(db_session: AsyncSession):
+    """Create a test user for validation operations."""
+    # Clean up any existing test user first
+    await db_session.execute(delete(Session).where(Session.user_id.in_(
+        select(User.id).where(User.email == "validateint@example.com")
+    )))
+    await db_session.execute(delete(User).where(User.email == "validateint@example.com"))
+    await db_session.commit()
+
+    user = User(
+        id=uuid4(),
+        email="validateint@example.com",
+        hashed_password=hash_password("testpass123"),
+        is_active=True,
+        is_superuser=False,
+        failed_login_attempts=0,
+        must_change_password=False,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    return user
+
+
+@pytest.fixture
+async def auth_headers(db_session: AsyncSession, test_user: User):
+    """Get auth headers with valid token."""
+    token, expires_at = create_access_token(
+        user_id=test_user.id,
+        email=test_user.email,
+        is_admin=test_user.is_superuser,
+        remember_me=False,
+    )
+    # Create session record
+    session = Session(
+        user_id=test_user.id,
+        token_hash=hash_token(token),
+        expires_at=expires_at,
+        is_revoked=False,
+    )
+    db_session.add(session)
+    await db_session.commit()
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def upload_test_document(client: AsyncClient, auth_headers: dict) -> str:
     """Helper to upload a test document and return its ID."""
     files = {"file": ("test.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf")}
-    response = await client.post("/documents/upload", files=files)
+    response = await client.post("/documents/upload", files=files, headers=auth_headers)
     assert response.status_code == 201
     return response.json()["id"]
 
@@ -213,10 +264,10 @@ def create_combined_extraction(
 
 @pytest.mark.asyncio
 async def test_validate_grounding_calibration_expired(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test grounding validation rejects expired calibration (GROUND-01)."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_grounding_extraction(
         document_id,
         calibration_expiry="2020-01-15",  # Past date = expired
@@ -227,9 +278,9 @@ async def test_validate_grounding_calibration_expired(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -245,10 +296,10 @@ async def test_validate_grounding_calibration_expired(
 
 @pytest.mark.asyncio
 async def test_validate_grounding_resistance_too_high(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test grounding validation rejects resistance > 10 ohms (GROUND-02)."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_grounding_extraction(
         document_id,
         resistance_value="15.0",  # > 10 ohms = ERROR
@@ -259,9 +310,9 @@ async def test_validate_grounding_resistance_too_high(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -277,10 +328,10 @@ async def test_validate_grounding_resistance_too_high(
 
 @pytest.mark.asyncio
 async def test_validate_grounding_method_missing(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test grounding validation rejects missing test method (GROUND-03)."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Create extraction with no test method
     extraction = ExtractionResult(
@@ -305,9 +356,9 @@ async def test_validate_grounding_method_missing(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -323,10 +374,10 @@ async def test_validate_grounding_method_missing(
 
 @pytest.mark.asyncio
 async def test_validate_grounding_complete_pass(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test grounding validation approves valid data."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_grounding_extraction(
         document_id,
         calibration_expiry="2030-12-31",  # Future = valid
@@ -339,9 +390,9 @@ async def test_validate_grounding_complete_pass(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -361,10 +412,10 @@ async def test_validate_grounding_complete_pass(
 
 @pytest.mark.asyncio
 async def test_validate_megger_calibration_expired(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test megger validation rejects expired calibration (MEGGER-01)."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_megger_extraction(
         document_id,
         calibration_expiry="2020-01-15",  # Past date = expired
@@ -375,9 +426,9 @@ async def test_validate_megger_calibration_expired(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -393,10 +444,10 @@ async def test_validate_megger_calibration_expired(
 
 @pytest.mark.asyncio
 async def test_validate_megger_voltage_too_high(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test megger validation rejects voltage higher than appropriate for equipment (MEGGER-02)."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     # For 250V equipment, max safe test voltage is 500V per IEEE 43
     extraction = create_megger_extraction(
         document_id,
@@ -409,9 +460,9 @@ async def test_validate_megger_voltage_too_high(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -428,10 +479,10 @@ async def test_validate_megger_voltage_too_high(
 
 @pytest.mark.asyncio
 async def test_validate_megger_insulation_low(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test megger validation warns on low insulation resistance (MEGGER-03)."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_megger_extraction(
         document_id,
         equipment_voltage="600",  # For 600V, minimum is 1 megohm per NETA
@@ -443,9 +494,9 @@ async def test_validate_megger_insulation_low(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -461,10 +512,10 @@ async def test_validate_megger_insulation_low(
 
 @pytest.mark.asyncio
 async def test_validate_megger_complete_pass(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test megger validation approves valid data."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     # For 600V equipment (501-1000V class): recommended test voltage is 1000V
     extraction = create_megger_extraction(
         document_id,
@@ -479,9 +530,9 @@ async def test_validate_megger_complete_pass(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -501,10 +552,10 @@ async def test_validate_megger_complete_pass(
 
 @pytest.mark.asyncio
 async def test_validate_all_test_types(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation runs all validators when document has thermo + grounding + megger."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Create extraction with all test types
     extraction = ExtractionResult(
@@ -562,9 +613,9 @@ async def test_validate_all_test_types(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -586,10 +637,10 @@ async def test_validate_all_test_types(
 
 @pytest.mark.asyncio
 async def test_validate_grounding_megger_only(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation works with grounding and megger but no thermography."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Create extraction with grounding + megger only (no thermography)
     extraction = ExtractionResult(
@@ -625,9 +676,9 @@ async def test_validate_grounding_megger_only(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -645,10 +696,10 @@ async def test_validate_grounding_megger_only(
 
 @pytest.mark.asyncio
 async def test_validate_evidence_tracks_grounding_megger(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation evidence_json tracks grounding and megger validation."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_combined_extraction(
         document_id,
         grounding_data=GroundingData(
@@ -676,9 +727,9 @@ async def test_validate_evidence_tracks_grounding_megger(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     # The response includes findings - grounding and megger data should be validated
@@ -700,10 +751,10 @@ async def test_validate_evidence_tracks_grounding_megger(
 
 @pytest.mark.asyncio
 async def test_validate_grounding_resistance_warning_threshold(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test grounding resistance between 5-10 ohms returns WARNING."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_grounding_extraction(
         document_id,
         resistance_value="7.5",  # Between 5 and 10 = WARNING
@@ -714,9 +765,9 @@ async def test_validate_grounding_resistance_warning_threshold(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -731,10 +782,10 @@ async def test_validate_grounding_resistance_warning_threshold(
 
 @pytest.mark.asyncio
 async def test_validate_grounding_clamp_on_new_installation(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test clamp-on method on new installation returns WARNING."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
     extraction = create_grounding_extraction(
         document_id,
         test_method="clamp-on",
@@ -746,9 +797,9 @@ async def test_validate_grounding_clamp_on_new_installation(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -764,10 +815,10 @@ async def test_validate_grounding_clamp_on_new_installation(
 
 @pytest.mark.asyncio
 async def test_validate_no_grounding_no_megger_no_findings(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test validation without grounding/megger produces no grounding/megger findings."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Create extraction with no grounding or megger data
     extraction = ExtractionResult(
@@ -791,9 +842,9 @@ async def test_validate_no_grounding_no_megger_no_findings(
         new_callable=AsyncMock,
         return_value=extraction,
     ):
-        await client.post(f"/documents/{document_id}/extract")
+        await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
-    response = await client.post(f"/documents/{document_id}/validate")
+    response = await client.post(f"/documents/{document_id}/validate", headers=auth_headers)
 
     assert response.status_code == 200
     data = response.json()

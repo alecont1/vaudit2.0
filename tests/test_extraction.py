@@ -3,11 +3,11 @@
 import io
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.schemas.extraction import (
@@ -17,7 +17,8 @@ from src.domain.schemas.extraction import (
     ExtractedField,
     FieldLocation,
 )
-from src.storage.models import Document, ValidationResult
+from src.domain.services.auth import hash_password, create_access_token, hash_token
+from src.storage.models import Document, User, Session, ValidationResult
 
 # Import MINIMAL_PDF from test_documents
 from tests.test_documents import MINIMAL_PDF
@@ -32,6 +33,52 @@ async def cleanup_uploads():
         for file in upload_dir.glob("*"):
             if file.is_file():
                 file.unlink()
+
+
+@pytest.fixture
+async def test_user(db_session: AsyncSession):
+    """Create a test user for extraction operations."""
+    # Clean up any existing test user first
+    await db_session.execute(delete(Session).where(Session.user_id.in_(
+        select(User.id).where(User.email == "extracttest@example.com")
+    )))
+    await db_session.execute(delete(User).where(User.email == "extracttest@example.com"))
+    await db_session.commit()
+
+    user = User(
+        id=uuid4(),
+        email="extracttest@example.com",
+        hashed_password=hash_password("testpass123"),
+        is_active=True,
+        is_superuser=False,
+        failed_login_attempts=0,
+        must_change_password=False,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    return user
+
+
+@pytest.fixture
+async def auth_headers(db_session: AsyncSession, test_user: User):
+    """Get auth headers with valid token."""
+    token, expires_at = create_access_token(
+        user_id=test_user.id,
+        email=test_user.email,
+        is_admin=test_user.is_superuser,
+        remember_me=False,
+    )
+    # Create session record
+    session = Session(
+        user_id=test_user.id,
+        token_hash=hash_token(token),
+        expires_at=expires_at,
+        is_revoked=False,
+    )
+    db_session.add(session)
+    await db_session.commit()
+    return {"Authorization": f"Bearer {token}"}
 
 
 def create_mock_extraction_result(document_id: str) -> ExtractionResult:
@@ -75,26 +122,26 @@ def create_mock_extraction_result(document_id: str) -> ExtractionResult:
     )
 
 
-async def upload_test_document(client: AsyncClient) -> str:
+async def upload_test_document(client: AsyncClient, auth_headers: dict) -> str:
     """Helper to upload a test document and return its ID."""
     files = {"file": ("test.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf")}
-    response = await client.post("/documents/upload", files=files)
+    response = await client.post("/documents/upload", files=files, headers=auth_headers)
     assert response.status_code == 201
     return response.json()["id"]
 
 
 @pytest.mark.asyncio
-async def test_extract_document_success(client: AsyncClient, cleanup_uploads):
+async def test_extract_document_success(client: AsyncClient, cleanup_uploads, auth_headers):
     """Test successful document extraction returns ExtractionResult with location data."""
     # Upload a document first
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Mock extract_document function
     mock_result = create_mock_extraction_result(document_id)
 
     with patch("src.pipeline.extraction.extract_document", new_callable=AsyncMock, return_value=mock_result):
         # Trigger extraction
-        response = await client.post(f"/documents/{document_id}/extract")
+        response = await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
         if response.status_code != 200:
             print(f"Error response: {response.json()}")
@@ -115,15 +162,15 @@ async def test_extract_document_success(client: AsyncClient, cleanup_uploads):
 
 @pytest.mark.asyncio
 async def test_extract_document_includes_location_data(
-    client: AsyncClient, cleanup_uploads
+    client: AsyncClient, cleanup_uploads, auth_headers
 ):
     """Test extraction result includes visual grounding data (PDF-04 requirement)."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     mock_result = create_mock_extraction_result(document_id)
 
     with patch("src.pipeline.extraction.extract_document", new_callable=AsyncMock, return_value=mock_result):
-        response = await client.post(f"/documents/{document_id}/extract")
+        response = await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
         assert response.status_code == 200
 
         data = response.json()
@@ -153,11 +200,11 @@ async def test_extract_document_includes_location_data(
 
 
 @pytest.mark.asyncio
-async def test_extract_document_not_found(client: AsyncClient, cleanup_uploads):
+async def test_extract_document_not_found(client: AsyncClient, cleanup_uploads, auth_headers):
     """Test extraction fails with 404 for non-existent document."""
     fake_uuid = "00000000-0000-0000-0000-000000000000"
 
-    response = await client.post(f"/documents/{fake_uuid}/extract")
+    response = await client.post(f"/documents/{fake_uuid}/extract", headers=auth_headers)
 
     assert response.status_code == 404
     assert "not found" in response.json()["detail"].lower()
@@ -165,10 +212,10 @@ async def test_extract_document_not_found(client: AsyncClient, cleanup_uploads):
 
 @pytest.mark.asyncio
 async def test_extract_missing_api_key(
-    client: AsyncClient, cleanup_uploads, db_session: AsyncSession
+    client: AsyncClient, cleanup_uploads, db_session: AsyncSession, auth_headers
 ):
     """Test extraction fails with 503 when API key is not configured."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Mock extract_document to raise ValueError (missing API key)
     with patch(
@@ -176,7 +223,7 @@ async def test_extract_missing_api_key(
         new_callable=AsyncMock,
         side_effect=ValueError("VISION_AGENT_API_KEY environment variable not set"),
     ):
-        response = await client.post(f"/documents/{document_id}/extract")
+        response = await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
         assert response.status_code == 503
         assert "VISION_AGENT_API_KEY" in response.json()["detail"]
@@ -192,12 +239,12 @@ async def test_extract_missing_api_key(
 
 @pytest.mark.asyncio
 async def test_extract_file_not_on_disk(
-    client: AsyncClient, db_session: AsyncSession, cleanup_uploads
+    client: AsyncClient, db_session: AsyncSession, cleanup_uploads, auth_headers, test_user
 ):
     """Test extraction fails with 404 when file is missing from disk."""
     # Create document record manually with non-existent file path
     document = Document(
-        user_id=None,  # type: ignore
+        user_id=test_user.id,  # Set user_id for ownership
         filename="missing.pdf",
         file_path="data/uploads/nonexistent-file.pdf",
         file_hash="fakehash123",
@@ -208,7 +255,7 @@ async def test_extract_file_not_on_disk(
     await db_session.commit()
     await db_session.refresh(document)
 
-    response = await client.post(f"/documents/{document.id}/extract")
+    response = await client.post(f"/documents/{document.id}/extract", headers=auth_headers)
 
     assert response.status_code == 404
     assert "not found on disk" in response.json()["detail"].lower()
@@ -216,12 +263,12 @@ async def test_extract_file_not_on_disk(
 
 @pytest.mark.asyncio
 async def test_extract_invalid_status(
-    client: AsyncClient, db_session: AsyncSession, cleanup_uploads
+    client: AsyncClient, db_session: AsyncSession, cleanup_uploads, auth_headers, test_user
 ):
     """Test extraction fails with 400 for invalid document status."""
     # Create document with "processing" status
     document = Document(
-        user_id=None,  # type: ignore
+        user_id=test_user.id,  # Set user_id for ownership
         filename="processing.pdf",
         file_path="data/uploads/test.pdf",
         file_hash="hash123",
@@ -232,27 +279,27 @@ async def test_extract_invalid_status(
     await db_session.commit()
     await db_session.refresh(document)
 
-    response = await client.post(f"/documents/{document.id}/extract")
+    response = await client.post(f"/documents/{document.id}/extract", headers=auth_headers)
 
     assert response.status_code == 400
     assert "status" in response.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
-async def test_get_extraction_success(client: AsyncClient, cleanup_uploads):
+async def test_get_extraction_success(client: AsyncClient, cleanup_uploads, auth_headers):
     """Test retrieving stored extraction results returns ExtractionResult."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Mock extraction and trigger it
     mock_result = create_mock_extraction_result(document_id)
 
     with patch("src.pipeline.extraction.extract_document", new_callable=AsyncMock, return_value=mock_result):
         # Trigger extraction (stores result in ValidationResult)
-        extract_response = await client.post(f"/documents/{document_id}/extract")
+        extract_response = await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
         assert extract_response.status_code == 200
 
     # Retrieve stored extraction
-    response = await client.get(f"/documents/{document_id}/extraction")
+    response = await client.get(f"/documents/{document_id}/extraction", headers=auth_headers)
 
     if response.status_code != 200:
         print(f"Error response: {response.json()}")
@@ -274,12 +321,12 @@ async def test_get_extraction_success(client: AsyncClient, cleanup_uploads):
 
 
 @pytest.mark.asyncio
-async def test_get_extraction_not_found(client: AsyncClient, cleanup_uploads):
+async def test_get_extraction_not_found(client: AsyncClient, cleanup_uploads, auth_headers):
     """Test retrieval fails with 404 when no extraction exists."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Try to get extraction before triggering it
-    response = await client.get(f"/documents/{document_id}/extraction")
+    response = await client.get(f"/documents/{document_id}/extraction", headers=auth_headers)
 
     assert response.status_code == 404
     assert "no extraction found" in response.json()["detail"].lower()
@@ -287,11 +334,11 @@ async def test_get_extraction_not_found(client: AsyncClient, cleanup_uploads):
 
 @pytest.mark.asyncio
 async def test_get_extraction_no_results(
-    client: AsyncClient, db_session: AsyncSession, cleanup_uploads
+    client: AsyncClient, db_session: AsyncSession, cleanup_uploads, auth_headers
 ):
     """Test retrieval fails with 404 when extraction_result_json is None."""
     # Upload document
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Create ValidationResult with no extraction_result_json
     from src.storage.models import ValidationStatus
@@ -305,7 +352,7 @@ async def test_get_extraction_no_results(
     db_session.add(validation)
     await db_session.commit()
 
-    response = await client.get(f"/documents/{document_id}/extraction")
+    response = await client.get(f"/documents/{document_id}/extraction", headers=auth_headers)
 
     assert response.status_code == 404
     assert "not completed" in response.json()["detail"].lower()
@@ -313,10 +360,10 @@ async def test_get_extraction_no_results(
 
 @pytest.mark.asyncio
 async def test_extraction_failure_handling(
-    client: AsyncClient, cleanup_uploads, db_session: AsyncSession
+    client: AsyncClient, cleanup_uploads, db_session: AsyncSession, auth_headers
 ):
     """Test extraction handles failure status and error messages."""
-    document_id = await upload_test_document(client)
+    document_id = await upload_test_document(client, auth_headers)
 
     # Mock extraction failure
     failed_result = ExtractionResult(
@@ -332,7 +379,7 @@ async def test_extraction_failure_handling(
         new_callable=AsyncMock,
         return_value=failed_result,
     ):
-        response = await client.post(f"/documents/{document_id}/extract")
+        response = await client.post(f"/documents/{document_id}/extract", headers=auth_headers)
 
         # Extraction endpoint returns the result even on failure
         assert response.status_code == 200
