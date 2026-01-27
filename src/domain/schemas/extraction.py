@@ -62,6 +62,34 @@ class ThermographyData(BaseModel):
     energy_marshal_comment: ExtractedField | None = None  # Comment if phase delta > 3C
 
 
+class GroundingData(BaseModel):
+    """Grounding test specific extracted data.
+
+    Contains calibration info for the grounding meter and test measurements.
+    Used for validating grounding test reports against GROUND-01 rules.
+    """
+
+    calibration: CalibrationInfo | None = None  # Grounding meter calibration
+    resistance_value: ExtractedField | None = None  # Measured resistance in ohms
+    test_method: ExtractedField | None = None  # fall-of-potential, clamp-on, etc.
+    installation_type: ExtractedField | None = None  # "new" or "existing"
+    measurements: list[MeasurementReading] = []  # Individual ground point readings
+
+
+class MeggerData(BaseModel):
+    """Megger/insulation test specific extracted data.
+
+    Contains calibration info for the megger and test measurements.
+    Used for validating insulation resistance test reports against MEGGER-01 rules.
+    """
+
+    calibration: CalibrationInfo | None = None  # Megger calibration
+    test_voltage: ExtractedField | None = None  # Voltage used for test (e.g., "500V")
+    equipment_voltage_rating: ExtractedField | None = None  # Rated voltage of equipment
+    insulation_resistance: ExtractedField | None = None  # Measured resistance in megohms
+    measurements: list[MeasurementReading] = []  # Individual circuit readings
+
+
 class ExtractionResult(BaseModel):
     """Complete extraction result for a document."""
 
@@ -73,6 +101,8 @@ class ExtractionResult(BaseModel):
     calibrations: list[CalibrationInfo] = []
     measurements: list[MeasurementReading] = []
     thermography: ThermographyData | None = None
+    grounding: GroundingData | None = None
+    megger: MeggerData | None = None
 
     # Raw extraction for debugging/audit
     raw_markdown: str | None = None
