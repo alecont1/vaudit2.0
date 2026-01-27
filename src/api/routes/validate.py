@@ -21,14 +21,20 @@ from src.domain.schemas.validation import (
 )
 from src.domain.validators.calibration import validate_calibration
 from src.domain.validators.camera_config import validate_camera_config
+from src.domain.validators.grounding_calibration import validate_grounding_calibration
+from src.domain.validators.grounding_resistance import validate_grounding_resistance
+from src.domain.validators.megger_calibration import validate_megger_calibration
+from src.domain.validators.megger_insulation import validate_insulation_resistance
+from src.domain.validators.megger_voltage import validate_test_voltage
 from src.domain.validators.phase_delta import validate_phase_delta
 from src.domain.validators.serial import collect_serial_numbers, validate_serial_consistency
+from src.domain.validators.test_method import validate_test_method
 from src.storage.models import Document, ValidationResult, ValidationStatus
 
 router = APIRouter()
 
 # Current rules version for audit trail
-RULES_VERSION = "2026-01-22"
+RULES_VERSION = "2026-01-27"
 
 
 @router.post("/{document_id}/validate", response_model=ValidationResponse)
@@ -137,6 +143,34 @@ async def validate_document(
             thermo_cal_findings = validate_calibration(calibration, test_date, rule_id="THERMO-03")
             all_findings.extend(thermo_cal_findings)
 
+    # 5d. Grounding validation (GROUND-01, GROUND-02, GROUND-03)
+    if extraction.grounding:
+        # GROUND-01: Grounding calibration validation
+        grounding_cal_findings = validate_grounding_calibration(extraction.grounding, test_date)
+        all_findings.extend(grounding_cal_findings)
+
+        # GROUND-02: Grounding resistance validation
+        resistance_findings = validate_grounding_resistance(extraction.grounding)
+        all_findings.extend(resistance_findings)
+
+        # GROUND-03: Test method validation
+        method_findings = validate_test_method(extraction.grounding)
+        all_findings.extend(method_findings)
+
+    # 5e. Megger validation (MEGGER-01, MEGGER-02, MEGGER-03)
+    if extraction.megger:
+        # MEGGER-01: Megger calibration validation
+        megger_cal_findings = validate_megger_calibration(extraction.megger, test_date)
+        all_findings.extend(megger_cal_findings)
+
+        # MEGGER-02: Test voltage validation
+        voltage_findings = validate_test_voltage(extraction.megger)
+        all_findings.extend(voltage_findings)
+
+        # MEGGER-03: Insulation resistance validation
+        insulation_findings = validate_insulation_resistance(extraction.megger)
+        all_findings.extend(insulation_findings)
+
     # 6. Compute overall status from findings
     computed_status = compute_status(all_findings)
 
@@ -155,6 +189,8 @@ async def validate_document(
         "serial_numbers_checked": len(serial_numbers),
         "thermography_validated": extraction.thermography is not None,
         "phase_readings_checked": len(extraction.thermography.phase_readings) if extraction.thermography else 0,
+        "grounding_validated": extraction.grounding is not None,
+        "megger_validated": extraction.megger is not None,
         "findings_count": len(all_findings),
     })
 
