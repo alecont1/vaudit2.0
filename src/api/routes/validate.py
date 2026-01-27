@@ -20,6 +20,8 @@ from src.domain.schemas.validation import (
     finding_to_response,
 )
 from src.domain.validators.calibration import validate_calibration
+from src.domain.validators.camera_config import validate_camera_config
+from src.domain.validators.phase_delta import validate_phase_delta
 from src.domain.validators.serial import collect_serial_numbers, validate_serial_consistency
 from src.storage.models import Document, ValidationResult, ValidationStatus
 
@@ -117,6 +119,24 @@ async def validate_document(
     serial_findings = validate_serial_consistency(serial_numbers)
     all_findings.extend(serial_findings)
 
+    # 5c. Thermography validation (THERMO-01, THERMO-02, THERMO-03)
+    if extraction.thermography:
+        # THERMO-01: Camera config validation
+        camera_findings = validate_camera_config(extraction.thermography)
+        all_findings.extend(camera_findings)
+
+        # THERMO-02: Phase delta validation
+        if extraction.thermography.phase_readings:
+            delta_findings = validate_phase_delta(extraction.thermography.phase_readings)
+            all_findings.extend(delta_findings)
+
+    # THERMO-03: Thermography calibration validation
+    # Find thermography calibration and validate with THERMO-03 rule_id
+    for calibration in extraction.calibrations:
+        if calibration.instrument_type and "thermo" in calibration.instrument_type.lower():
+            thermo_cal_findings = validate_calibration(calibration, test_date, rule_id="THERMO-03")
+            all_findings.extend(thermo_cal_findings)
+
     # 6. Compute overall status from findings
     computed_status = compute_status(all_findings)
 
@@ -133,6 +153,8 @@ async def validate_document(
         "test_date": str(test_date),
         "calibrations_checked": len(extraction.calibrations),
         "serial_numbers_checked": len(serial_numbers),
+        "thermography_validated": extraction.thermography is not None,
+        "phase_readings_checked": len(extraction.thermography.phase_readings) if extraction.thermography else 0,
         "findings_count": len(all_findings),
     })
 
