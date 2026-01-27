@@ -8,6 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from src.domain.schemas.validation import FindingResponse
 from src.storage.models import ValidationStatus
 
 
@@ -47,3 +48,33 @@ class HistoryListResponse(BaseModel):
     page_size: int = Field(ge=1, le=100, description="Items per page")
     has_next: bool = Field(description="Whether there are more pages")
     has_prev: bool = Field(description="Whether there are previous pages")
+
+
+class DocumentInfo(BaseModel):
+    """Document metadata for history detail view."""
+
+    id: UUID
+    filename: str
+    file_hash: str
+    file_size_bytes: int
+    uploaded_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class HistoryDetailResponse(BaseModel):
+    """Full validation detail for history view."""
+
+    id: UUID
+    document: DocumentInfo
+    status: ValidationStatus
+    findings: list[FindingResponse]
+    validated_at: datetime  # ValidationResult.created_at
+    validator_version: str | None  # rule_version
+    model_version: str | None
+    processing_time_ms: int | None
+
+    # Audit trail info
+    findings_count: int
+    has_extraction: bool
+    has_analysis: bool
