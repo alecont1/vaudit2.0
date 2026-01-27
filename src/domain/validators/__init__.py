@@ -3,6 +3,7 @@
 from src.domain.validators.calibration import validate_calibration
 from src.domain.validators.camera_config import validate_camera_config
 from src.domain.validators.date_parser import DateFormat, detect_format, parse_date
+from src.domain.validators.phase_delta import validate_phase_delta
 from src.domain.validators.serial import collect_serial_numbers, validate_serial_consistency
 
 __all__ = [
@@ -11,6 +12,7 @@ __all__ = [
     "DateFormat",
     "validate_calibration",
     "validate_camera_config",
+    "validate_phase_delta",
     "validate_serial_consistency",
     "collect_serial_numbers",
 ]
