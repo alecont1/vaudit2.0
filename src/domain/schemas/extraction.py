@@ -53,6 +53,15 @@ class MeasurementReading(BaseModel):
     unit: str | None = None
 
 
+class ThermographyData(BaseModel):
+    """Thermography-specific extracted data."""
+
+    camera_ambient_temp: ExtractedField | None = None  # Camera's ambient temp setting
+    datalogger_temp: ExtractedField | None = None  # External datalogger reading
+    phase_readings: list[MeasurementReading] = []  # Phase A, B, C temperatures
+    energy_marshal_comment: ExtractedField | None = None  # Comment if phase delta > 3C
+
+
 class ExtractionResult(BaseModel):
     """Complete extraction result for a document."""
 
@@ -63,6 +72,7 @@ class ExtractionResult(BaseModel):
     # Structured extracted data
     calibrations: list[CalibrationInfo] = []
     measurements: list[MeasurementReading] = []
+    thermography: ThermographyData | None = None
 
     # Raw extraction for debugging/audit
     raw_markdown: str | None = None
