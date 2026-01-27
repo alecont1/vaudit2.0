@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from src.api.dependencies import get_session
+from src.api.dependencies import get_session, require_auth
 from src.domain.schemas.evidence import compute_status, Finding
 from src.domain.schemas.extraction import ExtractionResult
 from src.domain.schemas.validation import (
@@ -29,7 +29,7 @@ from src.domain.validators.megger_voltage import validate_test_voltage
 from src.domain.validators.phase_delta import validate_phase_delta
 from src.domain.validators.serial import collect_serial_numbers, validate_serial_consistency
 from src.domain.validators.test_method import validate_test_method
-from src.storage.models import Document, ValidationResult, ValidationStatus
+from src.storage.models import Document, User, ValidationResult, ValidationStatus
 
 router = APIRouter()
 
@@ -42,6 +42,7 @@ async def validate_document(
     document_id: UUID,
     test_date: date | None = None,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(require_auth),
 ) -> ValidationResponse:
     """Validate a document that has been extracted.
 
@@ -68,6 +69,10 @@ async def validate_document(
 
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Check if user owns document or is admin
+    if document.user_id != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Access denied")
 
     # 2. Get latest ValidationResult for document (contains extraction)
     # Use limit(1) since there may be multiple records (append-only audit trail)

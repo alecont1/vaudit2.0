@@ -2,13 +2,15 @@
 
 import io
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.storage.models import Document
+from src.domain.services.auth import hash_password, create_access_token, hash_token
+from src.storage.models import Document, User, Session
 
 # Minimal valid PDF bytes (PDF 1.4 format)
 MINIMAL_PDF = b"""%PDF-1.4
@@ -39,13 +41,59 @@ async def cleanup_uploads():
                 file.unlink()
 
 
+@pytest.fixture
+async def test_user(db_session: AsyncSession):
+    """Create a test user for document operations."""
+    # Clean up any existing test user first
+    await db_session.execute(delete(Session).where(Session.user_id.in_(
+        select(User.id).where(User.email == "doctest@example.com")
+    )))
+    await db_session.execute(delete(User).where(User.email == "doctest@example.com"))
+    await db_session.commit()
+
+    user = User(
+        id=uuid4(),
+        email="doctest@example.com",
+        hashed_password=hash_password("testpass123"),
+        is_active=True,
+        is_superuser=False,
+        failed_login_attempts=0,
+        must_change_password=False,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    return user
+
+
+@pytest.fixture
+async def auth_headers(db_session: AsyncSession, test_user: User):
+    """Get auth headers with valid token."""
+    token, expires_at = create_access_token(
+        user_id=test_user.id,
+        email=test_user.email,
+        is_admin=test_user.is_superuser,
+        remember_me=False,
+    )
+    # Create session record
+    session = Session(
+        user_id=test_user.id,
+        token_hash=hash_token(token),
+        expires_at=expires_at,
+        is_revoked=False,
+    )
+    db_session.add(session)
+    await db_session.commit()
+    return {"Authorization": f"Bearer {token}"}
+
+
 @pytest.mark.asyncio
-async def test_upload_pdf_success(client: AsyncClient, cleanup_uploads):
+async def test_upload_pdf_success(client: AsyncClient, cleanup_uploads, auth_headers):
     """Test successful PDF upload returns 201 with document metadata."""
     # Create PDF file data
     files = {"file": ("test.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf")}
 
-    response = await client.post("/documents/upload", files=files)
+    response = await client.post("/documents/upload", files=files, headers=auth_headers)
 
     if response.status_code != 201:
         print(f"Error response: {response.json()}")
@@ -63,25 +111,25 @@ async def test_upload_pdf_success(client: AsyncClient, cleanup_uploads):
 
 
 @pytest.mark.asyncio
-async def test_upload_non_pdf_rejected(client: AsyncClient, cleanup_uploads):
+async def test_upload_non_pdf_rejected(client: AsyncClient, cleanup_uploads, auth_headers):
     """Test non-PDF file upload returns 400."""
     # Create a text file instead of PDF
     text_content = b"This is not a PDF file"
     files = {"file": ("test.txt", io.BytesIO(text_content), "text/plain")}
 
-    response = await client.post("/documents/upload", files=files)
+    response = await client.post("/documents/upload", files=files, headers=auth_headers)
 
     assert response.status_code == 400
     assert "PDF" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_upload_empty_file_rejected(client: AsyncClient, cleanup_uploads):
+async def test_upload_empty_file_rejected(client: AsyncClient, cleanup_uploads, auth_headers):
     """Test empty file upload returns 400."""
     # Create empty file
     files = {"file": ("empty.pdf", io.BytesIO(b""), "application/pdf")}
 
-    response = await client.post("/documents/upload", files=files)
+    response = await client.post("/documents/upload", files=files, headers=auth_headers)
 
     assert response.status_code == 400
     assert "empty" in response.json()["detail"].lower()
@@ -89,14 +137,14 @@ async def test_upload_empty_file_rejected(client: AsyncClient, cleanup_uploads):
 
 @pytest.mark.asyncio
 async def test_upload_creates_database_record(
-    client: AsyncClient, db_session: AsyncSession, cleanup_uploads
+    client: AsyncClient, db_session: AsyncSession, cleanup_uploads, auth_headers, test_user
 ):
     """Test upload creates Document record in database."""
     from uuid import UUID
 
     files = {"file": ("test.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf")}
 
-    response = await client.post("/documents/upload", files=files)
+    response = await client.post("/documents/upload", files=files, headers=auth_headers)
     assert response.status_code == 201
 
     document_id_str = response.json()["id"]
@@ -110,14 +158,15 @@ async def test_upload_creates_database_record(
     assert document.filename == "test.pdf"
     assert document.status == "uploaded"
     assert document.file_size_bytes == len(MINIMAL_PDF)
+    assert document.user_id == test_user.id  # Verify user_id is set
 
 
 @pytest.mark.asyncio
-async def test_upload_file_saved_to_disk(client: AsyncClient, cleanup_uploads):
+async def test_upload_file_saved_to_disk(client: AsyncClient, cleanup_uploads, auth_headers):
     """Test uploaded file is saved to disk at correct location."""
     files = {"file": ("test.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf")}
 
-    response = await client.post("/documents/upload", files=files)
+    response = await client.post("/documents/upload", files=files, headers=auth_headers)
     assert response.status_code == 201
 
     # Extract filename from response (has UUID prefix)
@@ -140,3 +189,14 @@ async def test_upload_file_saved_to_disk(client: AsyncClient, cleanup_uploads):
             break
 
     assert file_found, "Uploaded file with matching content not found on disk"
+
+
+@pytest.mark.asyncio
+async def test_upload_without_auth_returns_401(client: AsyncClient, cleanup_uploads):
+    """Test upload without authentication returns 401."""
+    files = {"file": ("test.pdf", io.BytesIO(MINIMAL_PDF), "application/pdf")}
+
+    response = await client.post("/documents/upload", files=files)
+
+    assert response.status_code == 401
+    assert "Authentication required" in response.json()["detail"]

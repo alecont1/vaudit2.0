@@ -7,11 +7,11 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from src.api.dependencies import get_session
+from src.api.dependencies import get_session, require_auth
 from src.domain.schemas.document import DocumentUploadResponse
 from src.domain.schemas.extraction import ExtractionResult
 from src.pipeline.file_storage import save_upload
-from src.storage.models import Document, ValidationResult, ValidationStatus
+from src.storage.models import Document, User, ValidationResult, ValidationStatus
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -23,6 +23,7 @@ MAX_FILE_SIZE = 50 * 1024 * 1024
 async def upload_document(
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(require_auth),
 ) -> DocumentUploadResponse:
     """Upload a PDF document for validation.
 
@@ -78,9 +79,8 @@ async def upload_document(
 
     try:
         # Create document record in database
-        # user_id=None for now (authentication comes in Phase 6)
         document = Document(
-            user_id=None,  # type: ignore  # Will be required after auth
+            user_id=current_user.id,
             filename=file.filename or "unknown.pdf",
             file_path=file_path,
             file_hash=file_hash,
@@ -105,6 +105,7 @@ async def upload_document(
 async def trigger_extraction(
     document_id: UUID,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(require_auth),
 ) -> ExtractionResult:
     """Trigger LandingAI extraction on an uploaded document.
 
@@ -117,6 +118,10 @@ async def trigger_extraction(
 
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Only allow access if user owns document or is admin
+    if document.user_id != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Access denied")
 
     if document.status not in ("uploaded", "completed"):
         raise HTTPException(
@@ -171,12 +176,24 @@ async def trigger_extraction(
 async def get_extraction(
     document_id: UUID,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(require_auth),
 ) -> ExtractionResult:
     """Retrieve extraction results for a document.
 
     Returns the structured extraction data with page/location references
     for each extracted field.
     """
+    # First check if document exists and user has access
+    doc_result = await session.execute(select(Document).where(Document.id == document_id))
+    document = doc_result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Only allow access if user owns document or is admin
+    if document.user_id != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     # Get latest validation result for document
     result = await session.execute(
         select(ValidationResult)
