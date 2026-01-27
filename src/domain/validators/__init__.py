@@ -1,6 +1,7 @@
 """Validation utilities for AuditEng V2."""
 
 from src.domain.validators.calibration import validate_calibration
+from src.domain.validators.camera_config import validate_camera_config
 from src.domain.validators.date_parser import DateFormat, detect_format, parse_date
 from src.domain.validators.serial import collect_serial_numbers, validate_serial_consistency
 
@@ -9,6 +10,7 @@ __all__ = [
     "detect_format",
     "DateFormat",
     "validate_calibration",
+    "validate_camera_config",
     "validate_serial_consistency",
     "collect_serial_numbers",
 ]
