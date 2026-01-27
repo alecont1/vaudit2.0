@@ -152,7 +152,7 @@ async def logout(
     )
     session = result.scalar_one_or_none()
 
-    if not session:
+    if not session or session.is_revoked:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
