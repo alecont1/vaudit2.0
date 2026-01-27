@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.schemas.auth import (
@@ -102,8 +102,13 @@ async def login(
     if len(active_sessions) >= MAX_CONCURRENT_SESSIONS:
         # Revoke oldest session(s) to make room
         sessions_to_revoke = active_sessions[:len(active_sessions) - MAX_CONCURRENT_SESSIONS + 1]
-        for old_session in sessions_to_revoke:
-            old_session.is_revoked = True
+        session_ids_to_revoke = [s.id for s in sessions_to_revoke]
+        await db.execute(
+            update(Session)
+            .where(Session.id.in_(session_ids_to_revoke))
+            .values(is_revoked=True)
+        )
+        await db.flush()  # Ensure revocation is written before creating new session
 
     # Create session record
     session = Session(
@@ -148,7 +153,10 @@ async def logout(
 
     # Find and revoke session
     result = await db.execute(
-        select(Session).where(Session.token_hash == token_hash_value)
+        select(Session)
+        .where(Session.token_hash == token_hash_value)
+        .order_by(Session.created_at.desc())
+        .limit(1)
     )
     session = result.scalar_one_or_none()
 

@@ -243,17 +243,61 @@ class TestLogout:
         assert response2.status_code == 401
 
 
+@pytest.fixture
+async def session_test_user(db_session: AsyncSession):
+    """Create a dedicated user for session limit tests."""
+    from sqlalchemy import delete, select
+
+    # Clean up any existing user and their sessions
+    result = await db_session.execute(
+        select(User).where(User.email == "sessiontest@example.com")
+    )
+    existing_user = result.scalar_one_or_none()
+    if existing_user:
+        await db_session.execute(
+            delete(Session).where(Session.user_id == existing_user.id)
+        )
+        await db_session.execute(
+            delete(User).where(User.email == "sessiontest@example.com")
+        )
+        await db_session.commit()
+
+    user = User(
+        id=uuid4(),
+        email="sessiontest@example.com",
+        hashed_password=hash_password("validpass123"),
+        is_active=True,
+        is_superuser=False,
+        failed_login_attempts=0,
+        must_change_password=False,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    yield user
+
+    # Cleanup after test - remove all sessions for this user
+    await db_session.execute(
+        delete(Session).where(Session.user_id == user.id)
+    )
+    await db_session.execute(
+        delete(User).where(User.id == user.id)
+    )
+    await db_session.commit()
+
+
 class TestSessionLimit:
     """Concurrent session limit tests."""
 
     @pytest.mark.asyncio
-    async def test_max_three_sessions(self, client: AsyncClient, test_user):
+    async def test_max_three_sessions(self, client: AsyncClient, session_test_user):
         """Fourth login revokes oldest session."""
         tokens = []
         for i in range(4):
             response = await client.post(
                 "/auth/login",
-                json={"email": "test@example.com", "password": "validpass123"},
+                json={"email": "sessiontest@example.com", "password": "validpass123"},
             )
             assert response.status_code == 200
             tokens.append(response.json()["access_token"])
