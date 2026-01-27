@@ -40,6 +40,8 @@ async def get_current_user(
         select(Session)
         .where(Session.token_hash == token_hash_value)
         .where(Session.is_revoked == False)
+        .order_by(Session.created_at.desc())
+        .limit(1)
     )
     session = session_result.scalar_one_or_none()
     if not session:
