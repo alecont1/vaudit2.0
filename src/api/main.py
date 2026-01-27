@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from src.api.routes import admin, auth, documents, health, validate
+from src.api.routes import admin, auth, documents, health, history, validate
 from src.storage.database import init_db
 
 
@@ -29,3 +29,4 @@ app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(documents.router, tags=["documents"])
 app.include_router(validate.router, prefix="/documents", tags=["validation"])
+app.include_router(history.router)
