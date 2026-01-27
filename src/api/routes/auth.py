@@ -7,14 +7,21 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.domain.schemas.auth import LoginRequest, TokenResponse, SessionInfo
+from src.domain.schemas.auth import (
+    LoginRequest, TokenResponse, SessionInfo,
+    PasswordChangeRequest, PasswordResetRequest, PasswordResetConfirm,
+)
 from src.domain.services.auth import (
     verify_password,
     create_access_token,
     hash_token,
+    hash_password,
+    verify_token,
+    generate_reset_token,
 )
+from src.domain.services.email import send_password_reset_email
 from src.storage.database import get_session
-from src.storage.models import User, Session
+from src.storage.models import User, Session, PasswordResetToken
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -116,3 +123,92 @@ async def login(
         token_type="bearer",
         expires_in=expires_in,
     )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """Revoke current session.
+
+    Expects Authorization header with Bearer token.
+    Returns 204 on success, 401 if token invalid/missing.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid authorization header",
+        )
+
+    token = auth_header.split(" ")[1]
+    token_hash_value = hash_token(token)
+
+    # Find and revoke session
+    result = await db.execute(
+        select(Session).where(Session.token_hash == token_hash_value)
+    )
+    session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session",
+        )
+
+    session.is_revoked = True
+    await db.commit()
+
+    return None  # 204 No Content
+
+
+@router.get("/sessions", response_model=list[SessionInfo])
+async def list_sessions(
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """List all active sessions for current user.
+
+    Requires valid JWT in Authorization header.
+    """
+    from src.domain.services.auth import verify_token
+
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authorization header",
+        )
+
+    token = auth_header.split(" ")[1]
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+
+    user_id = UUID(payload["sub"])
+    current_token_hash = hash_token(token)
+
+    result = await db.execute(
+        select(Session)
+        .where(Session.user_id == user_id)
+        .where(Session.is_revoked == False)
+        .where(Session.expires_at > datetime.utcnow())
+        .order_by(Session.created_at.desc())
+    )
+    sessions = result.scalars().all()
+
+    return [
+        SessionInfo(
+            id=s.id,
+            device_info=s.device_info,
+            ip_address=s.ip_address,
+            created_at=s.created_at,
+            expires_at=s.expires_at,
+            is_current=(s.token_hash == current_token_hash),
+        )
+        for s in sessions
+    ]
