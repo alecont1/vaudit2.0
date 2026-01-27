@@ -5,13 +5,22 @@ Provides paginated list of past validations with filtering capabilities.
 
 import json
 from datetime import date, datetime, time
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.api.dependencies import require_auth
-from src.domain.schemas.history import HistoryListItem, HistoryListResponse
+from src.domain.schemas.evidence import Finding
+from src.domain.schemas.history import (
+    DocumentInfo,
+    HistoryDetailResponse,
+    HistoryListItem,
+    HistoryListResponse,
+)
+from src.domain.schemas.validation import FindingResponse, finding_to_response
 from src.storage.database import get_session
 from src.storage.models import Document, User, ValidationResult, ValidationStatus
 
@@ -150,4 +159,76 @@ async def list_history(
         page_size=page_size,
         has_next=has_next,
         has_prev=has_prev,
+    )
+
+
+@router.get("/{validation_id}", response_model=HistoryDetailResponse)
+async def get_history_detail(
+    validation_id: UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(require_auth),
+) -> HistoryDetailResponse:
+    """Get full details of a past validation.
+
+    Returns complete validation result including all findings with
+    evidence (page numbers, bounding boxes, found vs expected values).
+
+    Args:
+        validation_id: UUID of the validation result
+        session: Database session
+        current_user: Authenticated user from JWT
+
+    Returns:
+        HistoryDetailResponse with full validation details
+
+    Raises:
+        HTTPException: 404 if validation not found, 403 if access denied
+    """
+    # 1. Get ValidationResult with Document join
+    result = await session.execute(
+        select(ValidationResult)
+        .where(ValidationResult.id == validation_id)
+        .options(selectinload(ValidationResult.document))
+    )
+    validation = result.scalar_one_or_none()
+
+    if not validation:
+        raise HTTPException(status_code=404, detail="Validation not found")
+
+    # 2. Check ownership (user owns document or is admin)
+    document = validation.document
+    if document.user_id != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # 3. Parse findings from JSON
+    findings: list[FindingResponse] = []
+    if validation.findings_json:
+        try:
+            findings_data = json.loads(validation.findings_json)
+            # findings_data is list of Finding dicts, convert to FindingResponse
+            for f_dict in findings_data:
+                finding = Finding(**f_dict)
+                findings.append(finding_to_response(finding))
+        except (json.JSONDecodeError, ValueError):
+            pass  # Leave findings empty on parse error
+
+    # 4. Build response
+    return HistoryDetailResponse(
+        id=validation.id,
+        document=DocumentInfo(
+            id=document.id,
+            filename=document.filename,
+            file_hash=document.file_hash,
+            file_size_bytes=document.file_size_bytes,
+            uploaded_at=document.created_at,
+        ),
+        status=validation.status,
+        findings=findings,
+        validated_at=validation.created_at,
+        validator_version=validation.rule_version,
+        model_version=validation.model_version,
+        processing_time_ms=validation.processing_time_ms,
+        findings_count=len(findings),
+        has_extraction=validation.extraction_result_json is not None,
+        has_analysis=validation.analysis_result_json is not None,
     )
