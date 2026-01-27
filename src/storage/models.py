@@ -38,8 +38,15 @@ class User(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
+    # Account security fields
+    failed_login_attempts: int = Field(default=0)
+    locked_until: datetime | None = Field(default=None)
+    must_change_password: bool = Field(default=False)
+
     # Relationships
     documents: list["Document"] = Relationship(back_populates="user")
+    sessions: list["Session"] = Relationship(back_populates="user")
+    password_reset_tokens: list["PasswordResetToken"] = Relationship(back_populates="user")
 
 
 class Document(SQLModel, table=True):
@@ -97,3 +104,45 @@ class ValidationResult(SQLModel, table=True):
 
     # Relationships
     document: Document = Relationship(back_populates="validation_results")
+
+
+class Session(SQLModel, table=True):
+    """Active user session tracking.
+
+    Tracks JWT tokens for session management and revocation.
+    Token is hashed (SHA256) for secure lookup without storing the JWT.
+    """
+
+    __tablename__ = "sessions"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    user_id: UUID = Field(foreign_key="users.id", index=True)
+    token_hash: str = Field(max_length=64, index=True)  # SHA256 hash of JWT
+    device_info: str | None = Field(default=None, max_length=500)
+    ip_address: str | None = Field(default=None, max_length=45)  # IPv6 max length
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime
+    is_revoked: bool = Field(default=False)
+
+    # Relationships
+    user: User = Relationship(back_populates="sessions")
+
+
+class PasswordResetToken(SQLModel, table=True):
+    """Password reset token for forgot password flow.
+
+    Tokens are single-use and expire after a short time window.
+    Token is hashed (SHA256) for secure storage.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    user_id: UUID = Field(foreign_key="users.id", index=True)
+    token_hash: str = Field(max_length=64, index=True)  # SHA256 hash of reset token
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime
+    used_at: datetime | None = Field(default=None)
+
+    # Relationships
+    user: User = Relationship(back_populates="password_reset_tokens")
