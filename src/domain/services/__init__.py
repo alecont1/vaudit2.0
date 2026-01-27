@@ -9,6 +9,7 @@ from .auth import (
     verify_password,
     verify_token,
 )
+from .email import send_password_reset_email, send_temp_password_email
 
 __all__ = [
     "hash_password",
@@ -18,4 +19,6 @@ __all__ = [
     "hash_token",
     "generate_temp_password",
     "generate_reset_token",
+    "send_password_reset_email",
+    "send_temp_password_email",
 ]
