@@ -68,22 +68,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS configuration for frontend - hardcoded for reliability
-CORS_ORIGINS = [
-    "https://frontend-production-888b.up.railway.app",
-    "http://localhost:5173",
-    "http://localhost:3000",
-]
-print(f"CORS allowed origins: {CORS_ORIGINS}")
-
+# CORS configuration - allow all origins with regex for debugging
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
+    allow_origin_regex=r".*",  # Allow ANY origin for debugging
+    allow_credentials=False,   # Must be False with regex/wildcard
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=600,
 )
 
 app.include_router(health.router, tags=["health"])
