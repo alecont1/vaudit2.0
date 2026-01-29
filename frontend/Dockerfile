@@ -23,12 +23,9 @@ RUN npm run build
 # Production stage with nginx
 FROM nginx:alpine
 
-# Install envsubst (part of gettext)
-RUN apk add --no-cache gettext
-
-# Create templates directory and nginx config template with PORT variable
-RUN mkdir -p /etc/nginx/templates && echo 'server { \
-    listen ${PORT}; \
+# Create nginx config (fixed port 80)
+RUN echo 'server { \
+    listen 80; \
     server_name _; \
     root /usr/share/nginx/html; \
     index index.html; \
@@ -44,19 +41,13 @@ RUN mkdir -p /etc/nginx/templates && echo 'server { \
         expires 1y; \
         add_header Cache-Control "public, immutable"; \
     } \
-}' > /etc/nginx/templates/default.conf.template
-
-# Remove default config
-RUN rm -f /etc/nginx/conf.d/default.conf
+}' > /etc/nginx/conf.d/default.conf
 
 # Copy built assets from builder stage (Vite outputs to 'build' folder)
 COPY --from=builder /app/build /usr/share/nginx/html
 
-# Default port (Railway overrides via PORT env var)
-ENV PORT=80
-
-# Expose port
+# Expose port 80
 EXPOSE 80
 
-# Start script: substitute PORT in nginx config and start nginx
-CMD envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'
+# Start nginx
+CMD ["nginx", "-g", "daemon off;"]
