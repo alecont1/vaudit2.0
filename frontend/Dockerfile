@@ -29,9 +29,8 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 # Copy built assets from builder stage (Vite outputs to 'build' folder)
 COPY --from=builder /app/build /usr/share/nginx/html
 
-# Copy startup script
-COPY start.sh /start.sh
-RUN chmod +x /start.sh
+# Create startup script inline (avoids Windows line ending issues)
+RUN printf '#!/bin/sh\nPORT=${PORT:-80}\nsed -i "s/listen 80;/listen $PORT;/" /etc/nginx/conf.d/default.conf\necho "Starting nginx on port $PORT"\nexec nginx -g "daemon off;"\n' > /start.sh && chmod +x /start.sh
 
 # Default port
 ENV PORT=80
