@@ -4,6 +4,16 @@
 
 AuditEng V2 is an automated validation system for electrical commissioning reports in data centers. It analyzes PDF test reports (thermography, grounding, megger) and determines whether they should be APPROVED or REJECTED based on technical standards. External clients access the system via web app and API.
 
+## Current Milestone: v1.0 Full System
+
+**Goal:** Complete validation system with PDF extraction, all 3 test types, web + API authentication, and validation history dashboard.
+
+**Target features:**
+- PDF upload and LandingAI extraction
+- Thermography, grounding, and megger validation with Claude analysis
+- Web authentication (email/password) and API authentication (API keys)
+- Validation history dashboard with evidence-based results
+
 ## Core Value
 
 **Zero false rejections.** Every rejection must have clear evidence. Precision over speed — a false positive costs retrabalho, credibility, and operational costs. When in doubt, flag for human review instead of auto-rejecting.
@@ -81,4 +91,4 @@ AuditEng V2 is an automated validation system for electrical commissioning repor
 | User accounts + API keys | Different auth for different access patterns | — Pending |
 
 ---
-*Last updated: 2026-01-21 after initialization*
+*Last updated: 2026-01-22 after milestone v1.0 started*

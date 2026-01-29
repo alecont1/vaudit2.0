@@ -11,6 +11,7 @@ class HealthResponse(BaseModel):
 
     status: str
     version: str
+    deploy: str
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -20,4 +21,4 @@ async def health_check() -> HealthResponse:
     Used by load balancers and monitoring systems to verify
     the service is running and responsive.
     """
-    return HealthResponse(status="ok", version="0.1.0")
+    return HealthResponse(status="ok", version="0.1.0", deploy="2026-01-29-cors-v2")
