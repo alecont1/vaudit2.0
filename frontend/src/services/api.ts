@@ -3,21 +3,10 @@
  */
 import axios, { AxiosInstance, AxiosError } from 'axios';
 
-// Determine API URL based on environment
-const getApiUrl = (): string => {
-  // Check for env variable first
-  if (import.meta.env.VITE_API_URL) {
-    return import.meta.env.VITE_API_URL;
-  }
-  // Production detection by hostname
-  if (typeof window !== 'undefined' && window.location.hostname.includes('railway.app')) {
-    return 'https://humble-warmth-production-e0c9.up.railway.app';
-  }
-  // Default for local development
-  return 'http://localhost:8000';
-};
-
-const API_BASE_URL = getApiUrl();
+// API URL - production by default, localhost only for local dev
+const API_BASE_URL = import.meta.env.DEV
+  ? 'http://localhost:8000'
+  : 'https://humble-warmth-production-e0c9.up.railway.app';
 
 // Create axios instance with default config
 export const api: AxiosInstance = axios.create({
