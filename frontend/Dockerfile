@@ -23,17 +23,21 @@ RUN npm run build
 # Production stage with nginx
 FROM nginx:alpine
 
-# Remove default nginx config
-RUN rm /etc/nginx/conf.d/default.conf
-
 # Copy custom nginx config
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Copy built assets from builder stage (Vite outputs to 'build' folder)
 COPY --from=builder /app/build /usr/share/nginx/html
 
-# Expose port 80
+# Copy startup script
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
+# Default port
+ENV PORT=80
+
+# Expose port
 EXPOSE 80
 
-# Start nginx
-CMD ["nginx", "-g", "daemon off;"]
+# Start with script that handles PORT variable
+CMD ["/start.sh"]
