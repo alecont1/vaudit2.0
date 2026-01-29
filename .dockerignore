@@ -1,0 +1,33 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Cache
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Planning docs
+.planning/
+
+# Local data
+data/
+
+# Frontend (separate service)
+frontend/
+
+# Misc
+*.lock
+nul
+# Keep README.md (required by pyproject.toml)

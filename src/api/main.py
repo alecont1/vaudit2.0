@@ -1,8 +1,10 @@
 """AuditEng V2 - FastAPI Application."""
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import admin, auth, documents, health, history, validate
 from src.storage.database import init_db
@@ -14,7 +16,7 @@ async def lifespan(app: FastAPI):
     # Startup
     await init_db()
     yield
-    # Shutdown (nothing to clean up for SQLite)
+    # Shutdown
 
 
 app = FastAPI(
@@ -22,6 +24,16 @@ app = FastAPI(
     description="Automated validation system for electrical commissioning reports",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+# CORS configuration for frontend
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_URL, "http://localhost:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(health.router, tags=["health"])
