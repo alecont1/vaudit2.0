@@ -69,17 +69,11 @@ app = FastAPI(
 )
 
 # CORS configuration for frontend
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
-ALLOWED_ORIGINS = [
-    FRONTEND_URL,
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "https://frontend-production-888b.up.railway.app",
-]
+# Allow all origins for now (Railway edge proxy compatibility)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,  # Must be False when using wildcard origins
     allow_methods=["*"],
     allow_headers=["*"],
 )
