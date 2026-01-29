@@ -46,8 +46,8 @@ RUN echo 'server { \
     } \
 }' > /etc/nginx/conf.d/default.conf
 
-# Copy built assets from builder stage
-COPY --from=builder /app/dist /usr/share/nginx/html
+# Copy built assets from builder stage (Vite outputs to 'build' folder)
+COPY --from=builder /app/build /usr/share/nginx/html
 
 # Expose port
 EXPOSE 80
