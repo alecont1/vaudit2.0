@@ -4,7 +4,7 @@ import Button from '../../components/ui/Button';
 import RecentAnalysisSidebar from './components/RecentAnalysisSidebar';
 import EvidenceUploadZone from './components/EvidenceUploadZone';
 import AnalysisLoadingState from './components/AnalysisLoadingState';
-import AnalysisResultsPanel from './components/AnalysisResultsPanel';
+import ValidationResultsPanel from './components/ValidationResultsPanel';
 import DetailedReasoningSidebar from './components/DetailedReasoningSidebar';
 import { useAnalysis } from '../../hooks/useAnalysis';
 import { AnalysisResult } from './types';
@@ -107,7 +107,7 @@ const ComplianceEngineerEvidenceAnalysisWorkspace: React.FC = () => {
             {isAnalyzing && <AnalysisLoadingState />}
 
             {!isAnalyzing && currentResult && (
-              <AnalysisResultsPanel
+              <ValidationResultsPanel
                 result={currentResult}
                 onDownloadReport={handleDownloadReport}
                 onNewAnalysis={handleNewAnalysis}

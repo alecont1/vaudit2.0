@@ -1,5 +1,12 @@
 export type ValidationStatus = 'APPROVED' | 'REJECTED' | 'REVIEW_NEEDED' | 'PENDING' | 'FAILED';
 
+export interface BoundingBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 export interface AnalysisResult {
   id: string;
   documentId: string;
@@ -23,12 +30,21 @@ export interface AnalysisFinding {
   status: 'APPROVED' | 'REJECTED' | 'REVIEW_NEEDED';
   message: string;
   severity: 'error' | 'warning' | 'info';
-  evidence?: {
-    page?: number;
-    field_name?: string;
-    found_value?: string;
-    expected_value?: string;
-  };
+  field_name?: string;
+  found_value?: string;
+  expected_value?: string;
+  page?: number;
+  bbox?: BoundingBox;
+}
+
+export type SeverityFilter = 'all' | 'error' | 'warning' | 'info';
+export type SortOrder = 'severity' | 'page' | 'rule_id';
+
+export interface PDFHighlight {
+  id: string;
+  page: number;
+  bbox: BoundingBox;
+  severity: 'error' | 'warning' | 'info';
 }
 
 export interface FileUpload {

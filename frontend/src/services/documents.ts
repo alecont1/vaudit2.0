@@ -117,6 +117,12 @@ export const documentsService = {
     );
     return response.data;
   },
+
+  getFileUrl(documentId: string): string {
+    const baseURL = api.defaults.baseURL;
+    const token = localStorage.getItem('access_token');
+    return `${baseURL}/documents/${documentId}/file?token=${token}`;
+  },
 };
 
 export default documentsService;

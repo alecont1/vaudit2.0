@@ -3,11 +3,12 @@
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from src.api.dependencies import get_session, require_auth
+from src.api.dependencies import get_session, require_auth, get_user_from_token
 from src.domain.schemas.document import DocumentUploadResponse
 from src.domain.schemas.extraction import ExtractionResult
 from src.pipeline.file_storage import save_upload
@@ -213,3 +214,64 @@ async def get_extraction(
     extraction_data = json.loads(validation.extraction_result_json)
     extraction_data["document_id"] = str(document_id)
     return ExtractionResult(**extraction_data)
+
+
+@router.get("/{document_id}/file", response_class=FileResponse, status_code=200)
+async def get_document_file(
+    document_id: UUID,
+    token: str = Query(..., description="JWT token for authentication"),
+    session: AsyncSession = Depends(get_session),
+) -> FileResponse:
+    """Download the original PDF file for a document.
+
+    Authentication is done via query parameter token for browser compatibility.
+    This allows the PDF to be loaded directly in an iframe or viewer.
+
+    Args:
+        document_id: UUID of the document to download
+        token: JWT token for authentication (passed as query param)
+        session: Database session from dependency injection
+
+    Returns:
+        FileResponse with the PDF file
+
+    Raises:
+        HTTPException 401: Invalid or missing token
+        HTTPException 403: Access denied
+        HTTPException 404: Document not found
+    """
+    # Authenticate user from token query parameter
+    current_user = await get_user_from_token(token, session)
+    if not current_user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+        )
+
+    if not current_user.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail="Account is disabled",
+        )
+
+    # Get document from database
+    result = await session.execute(select(Document).where(Document.id == document_id))
+    document = result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Only allow access if user owns document or is admin
+    if document.user_id != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Check if file exists on disk
+    file_path = Path(document.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Document file not found on disk")
+
+    return FileResponse(
+        path=file_path,
+        filename=document.filename,
+        media_type="application/pdf",
+    )

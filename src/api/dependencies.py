@@ -13,7 +13,7 @@ from src.domain.services.auth import verify_token, hash_token
 from src.storage.database import get_session
 from src.storage.models import User, Session
 
-__all__ = ["get_session", "get_current_user", "require_auth", "require_admin"]
+__all__ = ["get_session", "get_current_user", "require_auth", "require_admin", "get_user_from_token"]
 
 
 async def get_current_user(
@@ -110,5 +110,38 @@ async def require_admin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required",
         )
+
+    return user
+
+
+async def get_user_from_token(
+    token: str,
+    db: AsyncSession,
+) -> User | None:
+    """Get user from a raw JWT token string.
+
+    Used for endpoints that receive token via query parameter (e.g., file downloads).
+    """
+    payload = verify_token(token)
+    if not payload:
+        return None
+
+    # Verify session is still valid (not revoked)
+    token_hash_value = hash_token(token)
+    session_result = await db.execute(
+        select(Session)
+        .where(Session.token_hash == token_hash_value)
+        .where(Session.is_revoked == False)
+        .order_by(Session.created_at.desc())
+        .limit(1)
+    )
+    session = session_result.scalar_one_or_none()
+    if not session:
+        return None
+
+    # Get user
+    user_id = UUID(payload["sub"])
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
 
     return user
