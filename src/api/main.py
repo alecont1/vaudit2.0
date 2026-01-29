@@ -69,13 +69,22 @@ app = FastAPI(
 )
 
 # CORS configuration for frontend
-# Allow all origins for now (Railway edge proxy compatibility)
+# Railway Edge Proxy requires explicit origins (not wildcards) to work properly
+# The edge proxy intercepts OPTIONS requests and validates origins before they reach FastAPI
+# Get allowed origins from environment or use defaults
+CORS_ORIGINS = os.environ.get(
+    "CORS_ORIGINS",
+    "https://frontend-production-888b.up.railway.app,http://localhost:5173,http://localhost:3000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,  # Must be False when using wildcard origins
-    allow_methods=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,  # Now safe with explicit origins
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,  # Cache preflight for 10 minutes
 )
 
 app.include_router(health.router, tags=["health"])
