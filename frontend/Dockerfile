@@ -26,8 +26,8 @@ FROM nginx:alpine
 # Install envsubst (part of gettext)
 RUN apk add --no-cache gettext
 
-# Create nginx config template with PORT variable
-RUN echo 'server { \
+# Create templates directory and nginx config template with PORT variable
+RUN mkdir -p /etc/nginx/templates && echo 'server { \
     listen ${PORT}; \
     server_name _; \
     root /usr/share/nginx/html; \
