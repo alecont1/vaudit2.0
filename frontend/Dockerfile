@@ -23,38 +23,40 @@ RUN npm run build
 # Production stage with nginx
 FROM nginx:alpine
 
-# Copy custom nginx config
+# Install envsubst (part of gettext)
+RUN apk add --no-cache gettext
+
+# Create nginx config template with PORT variable
 RUN echo 'server { \
-    listen 80; \
+    listen ${PORT}; \
     server_name _; \
     root /usr/share/nginx/html; \
     index index.html; \
     \
-    # Gzip compression \
     gzip on; \
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript; \
     \
-    # SPA routing - all requests go to index.html \
     location / { \
         try_files $uri $uri/ /index.html; \
     } \
     \
-    # Cache static assets \
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ { \
         expires 1y; \
         add_header Cache-Control "public, immutable"; \
     } \
-}' > /etc/nginx/conf.d/default.conf
+}' > /etc/nginx/templates/default.conf.template
+
+# Remove default config
+RUN rm -f /etc/nginx/conf.d/default.conf
 
 # Copy built assets from builder stage (Vite outputs to 'build' folder)
 COPY --from=builder /app/build /usr/share/nginx/html
 
+# Default port (Railway overrides via PORT env var)
+ENV PORT=80
+
 # Expose port
 EXPOSE 80
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:80/ || exit 1
-
-# Start nginx
-CMD ["nginx", "-g", "daemon off;"]
+# Start script: substitute PORT in nginx config and start nginx
+CMD envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'
